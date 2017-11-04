@@ -7,6 +7,7 @@ import shutil
 import zipfile
 import time
 import tensorflow as tf
+import cv2
 from glob import glob
 from urllib.request import urlretrieve
 from tqdm import tqdm
@@ -83,16 +84,45 @@ def gen_batch_function(data_folder, image_shape):
             gt_images = []
             for image_file in image_paths[batch_i:batch_i+batch_size]:
                 gt_image_file = label_paths[os.path.basename(image_file)]
-
-                image = scipy.misc.imresize(scipy.misc.imread(image_file), image_shape)
-                gt_image = scipy.misc.imresize(scipy.misc.imread(gt_image_file), image_shape)
+                
+                image = scipy.misc.imread(image_file)
+                gt_image = scipy.misc.imread(gt_image_file)
+                
+                #Image Augmentation
+                rot_value=np.random.uniform(-15,15) #Rotation Value
+                siz_value=np.random.uniform(0.95,1.05) #Size Value
+    
+                rows = 1242
+                cols = 375
+                center=(cols/2,rows/2)
+                rot=cv2.getRotationMatrix2D(center,rot_value,siz_value)
+                # Rotation & Size
+                image_aug=cv2.warpAffine(image,rot,(cols,rows))
+                gt_image_aug=cv2.warpAffine(gt_image,rot,(cols,rows))
+                #Brightness
+                image_aug = cv2.cvtColor(image_aug,cv2.COLOR_RGB2HSV)
+                random_bright = .3+np.random.uniform()
+                image_aug[:,:,2] = image_aug[:,:,2]*random_bright
+                image_aug = cv2.cvtColor(image_aug, cv2.COLOR_HSV2RGB)
+                
+                image = scipy.misc.imresize(image, image_shape)
+                gt_image = scipy.misc.imresize(gt_image, image_shape)
+                
+                image_aug = scipy.misc.imresize(image_aug, image_shape)
+                gt_image_aug = scipy.misc.imresize(gt_image_aug, image_shape)
 
                 gt_bg = np.all(gt_image == background_color, axis=2)
                 gt_bg = gt_bg.reshape(*gt_bg.shape, 1)
                 gt_image = np.concatenate((gt_bg, np.invert(gt_bg)), axis=2)
+                
+                gt_bg_aug = np.all(gt_image_aug == background_color, axis=2)
+                gt_bg_aug = gt_bg_aug.reshape(*gt_bg_aug.shape, 1)
+                gt_image_aug = np.concatenate((gt_bg_aug, np.invert(gt_bg_aug)), axis=2)
 
                 images.append(image)
+                images.append(image_aug)
                 gt_images.append(gt_image)
+                gt_images.append(gt_image_aug)
 
             yield np.array(images), np.array(gt_images)
     return get_batches_fn
@@ -138,3 +168,40 @@ def save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_p
         sess, logits, keep_prob, input_image, os.path.join(data_dir, 'data_road/testing'), image_shape)
     for name, image in image_outputs:
         scipy.misc.imsave(os.path.join(output_dir, name), image)
+
+def gen_video_output(sess, logits, keep_prob, image_pl, video_file, image_shape):
+
+    cap = cv2.VideoCapture(video_file)
+    fourcc = cv2.VideoWriter_fourcc(*'DIVX')
+    filename = 'sementic_output.mp4'
+    out = cv2.VideoWriter(filename, fourcc, 25.0, (576,160))
+
+    while True:
+        ret, frame = cap.read()
+        if frame is None:
+            break
+        image = scipy.misc.imresize(frame, image_shape)
+
+        im_softmax = sess.run(
+            [tf.nn.softmax(logits)],
+            {keep_prob: 1.0, image_pl: [image]})
+        im_softmax = im_softmax[0][:, 1].reshape(image_shape[0], image_shape[1])
+        segmentation = (im_softmax > 0.5).reshape(image_shape[0], image_shape[1], 1)
+        mask = np.dot(segmentation, np.array([[255, 0, 0, 127]]))
+        #mask_full = scipy.misc.imresize(mask, frame.shape)
+        #mask_full = scipy.misc.toimage(mask_full, mode="RGBA")
+        mask = scipy.misc.toimage(mask, mode="RGBA")
+
+        street_im = scipy.misc.toimage(image)
+        street_im.paste(mask, box=None, mask=mask)
+
+        #street_im_full = scipy.misc.toimage(frame)
+        #street_im_full.paste(mask_full, box=None, mask=mask_full)
+        output = np.array(street_im)
+
+        out.write(output)
+
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+       
